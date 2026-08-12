@@ -92,12 +92,39 @@ export const classesRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
+      let finalTrainerId: number | null = null;
+
+      if (ctx.user.role === "trainer") {
+        // SECURITY RULE: Force trainers to only schedule classes for themselves
+        // to prevent scheduling classes under another trainer's name.
+        finalTrainerId = ctx.user.id;
+      } else if (ctx.user.role === "admin") {
+        if (input.trainerId !== undefined && input.trainerId !== null) {
+          // SECURITY RULE: Validate that the client-supplied trainer exists 
+          // and actually holds the trainer role in the database to prevent
+          // assigning class instruction duties to invalid or unauthorized users.
+          const targetTrainer = await ctx.db
+            .select()
+            .from(users)
+            .where(eq(users.id, input.trainerId))
+            .get();
+
+          if (!targetTrainer || targetTrainer.role !== "trainer") {
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message: "The specified trainer does not exist or is not a trainer.",
+            });
+          }
+          finalTrainerId = input.trainerId;
+        }
+      }
+
       return ctx.db
         .insert(classes)
         .values({
           ...input,
           description: input.description ?? null,
-          trainerId: input.trainerId ?? null,
+          trainerId: finalTrainerId,
         })
         .returning()
         .get();
@@ -116,6 +143,47 @@ export const classesRouter = router({
     )
     .mutation(async ({ ctx, input }) => {
       const { id, ...patch } = input;
+
+      const existingClass = await ctx.db
+        .select()
+        .from(classes)
+        .where(eq(classes.id, id))
+        .get();
+
+      if (!existingClass) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Class not found." });
+      }
+
+      if (ctx.user.role === "trainer") {
+        // SECURITY RULE: Restrict update capability to own classes to prevent
+        // trainers from modifying another trainer's class.
+        if (existingClass.trainerId !== ctx.user.id) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "Trainers may only modify classes assigned to themselves.",
+          });
+        }
+        // SECURITY RULE: Prevent trainers from reassigning the class trainer
+        // to block unauthorized schedule modifications or bypassing limits.
+        delete patch.trainerId;
+      } else if (ctx.user.role === "admin") {
+        if (patch.trainerId !== undefined && patch.trainerId !== null) {
+          // SECURITY RULE: Ensure new trainer is registered and authorized.
+          const targetTrainer = await ctx.db
+            .select()
+            .from(users)
+            .where(eq(users.id, patch.trainerId))
+            .get();
+
+          if (!targetTrainer || targetTrainer.role !== "trainer") {
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message: "The specified trainer does not exist or is not a trainer.",
+            });
+          }
+        }
+      }
+
       const updated = await ctx.db
         .update(classes)
         .set(patch)
@@ -123,9 +191,6 @@ export const classesRouter = router({
         .returning()
         .get();
 
-      if (!updated) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Class not found." });
-      }
       return updated;
     }),
 
