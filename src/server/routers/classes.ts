@@ -1,8 +1,9 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { and, asc, eq, gte, lte, sql } from "drizzle-orm";
-import { classes, bookings, users } from "@/db/schema";
+import { classes, bookings, users, corporateBookings } from "@/db/schema";
 import { router, publicProcedure, staffProcedure, adminProcedure } from "../trpc";
+import { isPastClass } from "@/lib/dates";
 
 export const classesRouter = router({
   list: publicProcedure
@@ -17,7 +18,10 @@ export const classesRouter = router({
     )
     .query(async ({ ctx, input }) => {
       const filters = [];
-      if (input.from) filters.push(gte(classes.startsAt, input.from));
+      // SECURITY & DATA INTEGRITY RULE: Default to filtering out past classes if no from date is explicitly
+      // specified, which prevents historical slots from cluttering standard upcoming schedule queries.
+      const fromTime = input.from ?? new Date().toISOString();
+      filters.push(gte(classes.startsAt, fromTime));
       if (input.to) filters.push(lte(classes.startsAt, input.to));
       if (!input.includeCancelled) filters.push(eq(classes.cancelled, false));
 
@@ -34,9 +38,8 @@ export const classesRouter = router({
           cancelled: classes.cancelled,
           trainerName: users.name,
           booked: sql<number>`(
-            select count(*) from ${bookings}
-            where ${bookings.classId} = ${classes.id}
-              and ${bookings.status} = 'booked'
+            COALESCE((select count(*) from ${bookings} where ${bookings.classId} = ${classes.id} and ${bookings.status} = 'booked'), 0) +
+            COALESCE((select count(*) from ${corporateBookings} where ${corporateBookings.classId} = ${classes.id} and ${corporateBookings.status} = 'booked'), 0)
           )`.as("booked"),
         })
         .from(classes)
@@ -92,6 +95,15 @@ export const classesRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
+      // DATA INTEGRITY RULE: Reject creating classes in the past to maintain scheduling integrity on the server side,
+      // as relying only on UI validations is insufficient and vulnerable to API abuse.
+      if (isPastClass(input.startsAt)) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Cannot create a class with a start time in the past.",
+        });
+      }
+
       let finalTrainerId: number | null = null;
 
       if (ctx.user.role === "trainer") {
@@ -143,6 +155,14 @@ export const classesRouter = router({
     )
     .mutation(async ({ ctx, input }) => {
       const { id, ...patch } = input;
+
+      // DATA INTEGRITY RULE: Reject updating classes to a start time in the past to maintain calendar integrity.
+      if (input.startsAt && isPastClass(input.startsAt)) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Cannot update a class to a start time in the past.",
+        });
+      }
 
       const existingClass = await ctx.db
         .select()

@@ -4,33 +4,102 @@ import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { formatDateTime } from "@/lib/format";
 
-function ClassCard({ classId, className, startsAt, room, durationMin, cancelled }: { classId: number; className: string; startsAt: string; room: string; durationMin: number; cancelled: boolean }) {
+function ClassCard({ classId, className, startsAt, room, durationMin, capacity, cancelled }: { classId: number; className: string; startsAt: string; room: string; durationMin: number; capacity: number; cancelled: boolean }) {
+  const utils = trpc.useUtils();
   const { data: roster, isLoading: rosterLoading } = trpc.bookings.rosterFor.useQuery({ classId });
   const { data: checkinData, isLoading: checkinLoading } = trpc.bookings.checkinCountFor.useQuery({ classId });
+
+  const markAttended = trpc.bookings.markAttended.useMutation({
+    onSuccess: () => {
+      utils.bookings.rosterFor.invalidate({ classId });
+      utils.bookings.checkinCountFor.invalidate({ classId });
+    },
+  });
+
+  const markNoShow = trpc.bookings.markNoShow.useMutation({
+    onSuccess: () => {
+      utils.bookings.rosterFor.invalidate({ classId });
+      utils.bookings.checkinCountFor.invalidate({ classId });
+    },
+  });
+
+  const [expanded, setExpanded] = useState(false);
 
   const bookedCount = roster?.filter((r) => r.status === "booked" || r.status === "attended").length || 0;
   const checkins = checkinData?.count || 0;
 
   return (
-    <div className="p-3 text-sm">
+    <div className="p-4 text-sm space-y-3">
       <div className="flex items-center justify-between">
         <div>
-          <div className="font-medium">{className}</div>
+          <div className="font-medium text-base">{className}</div>
           <div className="muted mt-1 text-xs">
             {formatDateTime(startsAt)} · {room} · {durationMin} min
           </div>
           {!rosterLoading && !checkinLoading && (
             <div className="muted mt-2 text-xs">
-              📊 {bookedCount} booked · ✓ {checkins} checked in
+              📊 {bookedCount} / {capacity} booked · ✓ {checkins} checked in
             </div>
           )}
           {cancelled && (
-            <div className="mt-1 rounded px-2 py-1 text-xs" style={{ background: "#7f1d1d", color: "#fca5a5" }}>
+            <div className="mt-1 rounded px-2 py-1 text-xs inline-block" style={{ background: "#7f1d1d", color: "#fca5a5" }}>
               Cancelled
             </div>
           )}
         </div>
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="btn btn-sm"
+          style={{ background: "var(--bg-secondary)", borderColor: "var(--border)" }}
+        >
+          {expanded ? "Hide Roster" : "View Roster"}
+        </button>
       </div>
+
+      {expanded && (
+        <div className="mt-4 space-y-2 border-t pt-3" style={{ borderColor: "var(--border)" }}>
+          <h4 className="font-medium text-xs uppercase tracking-wider muted">Class Roster</h4>
+          {rosterLoading ? (
+            <p className="muted text-xs">Loading roster...</p>
+          ) : !roster || roster.length === 0 ? (
+            <p className="muted text-xs">No bookings for this class.</p>
+          ) : (
+            <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+              {roster.map((member) => (
+                <div key={member.bookingId} className="flex items-center justify-between p-2 rounded bg-opacity-50" style={{ background: "var(--bg-secondary)" }}>
+                  <div>
+                    <div className="font-medium text-xs">{member.memberName}</div>
+                    <div className="muted text-[10px]">{member.memberEmail}</div>
+                    <div className="text-[10px] mt-0.5">
+                      Status: <span className="uppercase font-semibold" style={{ color: member.status === "attended" ? "#4ade80" : member.status === "no_show" ? "#f87171" : "var(--fg)" }}>{member.status}</span>
+                    </div>
+                  </div>
+                  {member.status === "booked" && (
+                    <div className="flex gap-1">
+                      <button
+                        onClick={() => markAttended.mutate({ bookingId: member.bookingId })}
+                        disabled={markAttended.isPending || markNoShow.isPending}
+                        className="btn btn-sm py-0.5 px-2 text-xs"
+                        style={{ background: "#15803d", color: "white" }}
+                      >
+                        Check-in
+                      </button>
+                      <button
+                        onClick={() => markNoShow.mutate({ bookingId: member.bookingId })}
+                        disabled={markAttended.isPending || markNoShow.isPending}
+                        className="btn btn-sm py-0.5 px-2 text-xs"
+                        style={{ background: "#b91c1c", color: "white" }}
+                      >
+                        No-show
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -120,7 +189,7 @@ export default function TrainerSchedulePage() {
         {classes && classes.length > 0 ? (
           <div className="panel divide-y" style={{ borderColor: "var(--border)" }}>
             {classes.map((cls) => (
-              <ClassCard key={cls.id} classId={cls.id} className={cls.name} startsAt={cls.startsAt} room={cls.room} durationMin={cls.durationMin} cancelled={cls.cancelled} />
+              <ClassCard key={cls.id} classId={cls.id} className={cls.name} startsAt={cls.startsAt} room={cls.room} durationMin={cls.durationMin} capacity={cls.capacity} cancelled={cls.cancelled} />
             ))}
           </div>
         ) : (

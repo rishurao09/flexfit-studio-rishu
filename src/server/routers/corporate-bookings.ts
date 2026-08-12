@@ -8,8 +8,13 @@ import {
   companyMembers,
   checkins,
   users,
+  bookings,
+  notifications,
+  memberships,
 } from "@/db/schema";
 import { router, protectedProcedure, staffProcedure } from "../trpc";
+
+import { hoursBetween } from "@/lib/dates";
 
 /**
  * Corporate members may cancel free of charge up to this many hours before
@@ -18,7 +23,7 @@ import { router, protectedProcedure, staffProcedure } from "../trpc";
 export const CORPORATE_FREE_CANCELLATION_HOURS = 24;
 
 function hoursUntil(iso: string, now = new Date()): number {
-  return (new Date(iso).getTime() - now.getTime()) / 36e5;
+  return hoursBetween(iso, now.toISOString());
 }
 
 async function getCompanyForMember(
@@ -71,6 +76,14 @@ export const corporateBookingsRouter = router({
   book: protectedProcedure
     .input(z.object({ classId: z.number() }))
     .mutation(async ({ ctx, input }) => {
+      // SECURITY & BUSINESS RULE: Ensure the caller's account is active.
+      if (!ctx.user.active) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "This account has been deactivated.",
+        });
+      }
+
       const cls = await ctx.db
         .select()
         .from(classes)
@@ -128,17 +141,24 @@ export const corporateBookingsRouter = router({
         });
       }
 
-      const [{ count }] = await ctx.db
-        .select({ count: sql<number>`count(*)` })
-        .from(corporateBookings)
+      // DATA INTEGRITY / UNIFIED CAPACITY RULE: Count both standard and corporate confirmed bookings 
+      // combined to determine actual physical occupancy, preventing classrooms from exceeding room limits.
+      const [{ stdCount }] = await ctx.db
+        .select({ stdCount: sql<number>`count(*)` })
+        .from(bookings)
         .where(
-          and(
-            eq(corporateBookings.classId, cls.id),
-            eq(corporateBookings.status, "booked"),
-          ),
+          and(eq(bookings.classId, cls.id), eq(bookings.status, "booked")),
         );
 
-      const isFull = Number(count) >= cls.capacity;
+      const [{ corpCount }] = await ctx.db
+        .select({ corpCount: sql<number>`count(*)` })
+        .from(corporateBookings)
+        .where(
+          and(eq(corporateBookings.classId, cls.id), eq(corporateBookings.status, "booked")),
+        );
+
+      const totalBooked = Number(stdCount || 0) + Number(corpCount || 0);
+      const isFull = totalBooked >= cls.capacity;
 
       const created = await ctx.db
         .insert(corporateBookings)
@@ -221,42 +241,98 @@ export const corporateBookingsRouter = router({
         }
       }
 
-      // Freeing a confirmed spot promotes the member who has waited longest.
+      // Freeing a confirmed spot promotes the oldest valid waitlisted member (unified across standard and corporate bookings).
       if (row.booking.status === "booked") {
-        const next = await ctx.db
+        const normalWaitlist = await ctx.db
+          .select()
+          .from(bookings)
+          .where(and(eq(bookings.classId, row.cls.id), eq(bookings.status, "waitlisted")));
+
+        const corpWaitlist = await ctx.db
           .select()
           .from(corporateBookings)
-          .where(
-            and(
-              eq(corporateBookings.classId, row.cls.id),
-              eq(corporateBookings.status, "waitlisted"),
-            ),
-          )
-          .orderBy(asc(corporateBookings.bookedAt))
-          .get();
+          .where(and(eq(corporateBookings.classId, row.cls.id), eq(corporateBookings.status, "waitlisted")));
 
-        if (next) {
-          await ctx.db
-            .update(corporateBookings)
-            .set({ status: "booked", creditsUsed: row.cls.creditCost })
-            .where(eq(corporateBookings.id, next.id));
+        // Merge standard and corporate waitlist entries, sorting by registration time to honor queue priority.
+        const combinedWaitlist = [
+          ...normalWaitlist.map((w) => ({ ...w, type: "normal" as const })),
+          ...corpWaitlist.map((w) => ({ ...w, type: "corporate" as const })),
+        ].sort((a, b) => new Date(a.bookedAt).getTime() - new Date(b.bookedAt).getTime());
 
-          const company = await ctx.db
-            .select()
-            .from(companies)
-            .where(eq(companies.id, next.companyId))
-            .get();
+        const today = new Date().toISOString().slice(0, 10);
 
-          if (company && company.creditPoolBalance >= row.cls.creditCost) {
-            await ctx.db
-              .update(companies)
-              .set({
-                creditPoolBalance: Math.max(
-                  0,
-                  company.creditPoolBalance - row.cls.creditCost,
-                ),
-              })
-              .where(eq(companies.id, company.id));
+        for (const candidate of combinedWaitlist) {
+          if (candidate.type === "normal") {
+            if (!candidate.membershipId) continue;
+            const ms = await ctx.db
+              .select()
+              .from(memberships)
+              .where(eq(memberships.id, candidate.membershipId))
+              .get();
+
+            // WAITLIST ELIGIBILITY RULE: Verify standard membership is active, not expired, not frozen,
+            // and contains sufficient class credits before promoting the candidate.
+            const isEligible = ms &&
+              ms.status === "active" &&
+              ms.endDate >= today &&
+              (ms.creditsRemaining >= 999 || ms.creditsRemaining >= row.cls.creditCost);
+
+            if (isEligible) {
+              await ctx.db
+                .update(bookings)
+                .set({ status: "booked", creditsUsed: row.cls.creditCost })
+                .where(eq(bookings.id, candidate.id));
+
+              if (ms.creditsRemaining < 999) {
+                await ctx.db
+                  .update(memberships)
+                  .set({ creditsRemaining: ms.creditsRemaining - row.cls.creditCost })
+                  .where(eq(memberships.id, ms.id));
+              }
+
+              // Create waitlist promotion notification
+              await ctx.db.insert(notifications).values({
+                userId: candidate.userId,
+                type: "waitlist_promotion",
+                title: "Waitlist Promotion",
+                message: `Good news! You have been promoted from the waitlist to a confirmed spot in ${row.cls.name}.`,
+                read: false,
+              });
+
+              break;
+            }
+          } else {
+            const company = await ctx.db
+              .select()
+              .from(companies)
+              .where(eq(companies.id, candidate.companyId))
+              .get();
+
+            // WAITLIST ELIGIBILITY RULE: Verify corporate account is active and has enough credits in the shared pool.
+            const isEligible = company && company.active && company.creditPoolBalance >= row.cls.creditCost;
+
+            if (isEligible) {
+              await ctx.db
+                .update(corporateBookings)
+                .set({ status: "booked", creditsUsed: row.cls.creditCost })
+                .where(eq(corporateBookings.id, candidate.id));
+
+              await ctx.db
+                .update(companies)
+                .set({ creditPoolBalance: company.creditPoolBalance - row.cls.creditCost })
+                .where(eq(companies.id, company.id));
+
+              // Create waitlist promotion notification
+              await ctx.db.insert(notifications).values({
+                userId: candidate.userId,
+                type: "waitlist_promotion",
+                title: "Waitlist Promotion",
+                message: `Good news! You have been promoted to a confirmed spot in ${row.cls.name} using your company credits.`,
+                read: false,
+              });
+
+              break;
+            }
           }
         }
       }
@@ -297,6 +373,33 @@ export const corporateBookingsRouter = router({
         userId: booking.userId,
         bookingId: null,
       });
+
+      return { ok: true };
+    }),
+
+  markNoShow: staffProcedure
+    .input(z.object({ bookingId: z.number() }))
+    .mutation(async ({ ctx, input }) => {
+      const booking = await ctx.db
+        .select()
+        .from(corporateBookings)
+        .where(eq(corporateBookings.id, input.bookingId))
+        .get();
+
+      if (!booking) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Booking not found." });
+      }
+      if (booking.status !== "booked") {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Only confirmed bookings can be marked as no-show.",
+        });
+      }
+
+      await ctx.db
+        .update(corporateBookings)
+        .set({ status: "no_show" })
+        .where(eq(corporateBookings.id, booking.id));
 
       return { ok: true };
     }),

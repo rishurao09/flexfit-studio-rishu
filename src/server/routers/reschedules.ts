@@ -6,8 +6,13 @@ import {
   bookings,
   classes,
   memberships,
+  corporateBookings,
+  notifications,
+  companies,
 } from "@/db/schema";
 import { router, protectedProcedure } from "../trpc";
+
+import { getLocalDateString, hoursBetween } from "@/lib/dates";
 
 /**
  * Members may reschedule free of charge up to this many hours before the
@@ -16,14 +21,14 @@ import { router, protectedProcedure } from "../trpc";
 export const FREE_RESCHEDULE_HOURS = 4;
 
 function hoursUntil(iso: string, now = new Date()): number {
-  return (new Date(iso).getTime() - now.getTime()) / 36e5;
+  return hoursBetween(iso, now.toISOString());
 }
 
 async function activeMembershipFor(
   db: typeof import("@/db").db,
   userId: number,
 ) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = getLocalDateString();
   return db
     .select()
     .from(memberships)
@@ -86,6 +91,14 @@ export const reschedulesRouter = router({
 
       // Verify reschedule is allowed (within 4 hours of original class)
       const hoursBeforeOriginal = hoursUntil(originalClass.startsAt);
+      // DATA INTEGRITY RULE: Reject rescheduling if the original class has already started
+      // to prevent members from rescheduling slots they already missed or completed.
+      if (hoursBeforeOriginal <= 0) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Cannot reschedule a class that has already started.",
+        });
+      }
       if (hoursBeforeOriginal < FREE_RESCHEDULE_HOURS) {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -159,15 +172,24 @@ export const reschedulesRouter = router({
         });
       }
 
-      // Check if target class is full
-      const [{ count }] = await ctx.db
-        .select({ count: sql<number>`count(*)` })
+      // DATA INTEGRITY / UNIFIED CAPACITY RULE: Count both standard and corporate confirmed bookings 
+      // combined to determine actual physical occupancy, preventing classrooms from exceeding room limits.
+      const [{ stdCount }] = await ctx.db
+        .select({ stdCount: sql<number>`count(*)` })
         .from(bookings)
         .where(
           and(eq(bookings.classId, targetClass.id), eq(bookings.status, "booked")),
         );
 
-      const targetIsFull = Number(count) >= targetClass.capacity;
+      const [{ corpCount }] = await ctx.db
+        .select({ corpCount: sql<number>`count(*)` })
+        .from(corporateBookings)
+        .where(
+          and(eq(corporateBookings.classId, targetClass.id), eq(corporateBookings.status, "booked")),
+        );
+
+      const totalBooked = Number(stdCount || 0) + Number(corpCount || 0);
+      const targetIsFull = totalBooked >= targetClass.capacity;
 
       // Get the membership to check for unlimited credits
       const membership = originalBooking.membershipId
@@ -176,17 +198,36 @@ export const reschedulesRouter = router({
             .from(memberships)
             .where(eq(memberships.id, originalBooking.membershipId))
             .get()
-        : null;
+          : null;
 
-      // Create the new booking (don't charge credits, they keep what they spent)
+      // SECURITY & BUSINESS RULE: Rescheduling a waitlisted booking (creditsUsed = 0) must NOT grant
+      // a confirmed spot for free. Force waitlisted reschedules to remain waitlisted.
+      const newStatus = originalBooking.status === "waitlisted"
+        ? "waitlisted"
+        : (targetIsFull ? "waitlisted" : "booked");
+
+      const newCreditsUsed = newStatus === "waitlisted" ? 0 : originalBooking.creditsUsed;
+
+      // DATA INTEGRITY RULE: If a confirmed booking (creditsUsed > 0) is downgraded to waitlisted in the target class,
+      // refund the original credits used to the membership so they are not permanently trapped or double charged.
+      if (originalBooking.status === "booked" && newStatus === "waitlisted") {
+        if (membership && membership.creditsRemaining < 999) {
+          await ctx.db
+            .update(memberships)
+            .set({ creditsRemaining: membership.creditsRemaining + originalBooking.creditsUsed })
+            .where(eq(memberships.id, membership.id));
+        }
+      }
+
+      // Create the new booking
       const newBooking = await ctx.db
         .insert(bookings)
         .values({
           classId: targetClass.id,
           userId: ctx.user.id,
           membershipId: originalBooking.membershipId,
-          status: targetIsFull ? "waitlisted" : "booked",
-          creditsUsed: originalBooking.creditsUsed, // Keep the same credits used
+          status: newStatus,
+          creditsUsed: newCreditsUsed,
         })
         .returning()
         .get();
@@ -199,6 +240,97 @@ export const reschedulesRouter = router({
           cancelledAt: new Date().toISOString(),
         })
         .where(eq(bookings.id, originalBooking.id));
+
+      // DATA INTEGRITY & PROMOTION RULE: Rescheduling out of a confirmed class frees a spot,
+      // which must trigger unified waitlist promotion on the original class.
+      if (originalBooking.status === "booked") {
+        const normalWaitlist = await ctx.db
+          .select()
+          .from(bookings)
+          .where(and(eq(bookings.classId, originalClass.id), eq(bookings.status, "waitlisted")));
+
+        const corpWaitlist = await ctx.db
+          .select()
+          .from(corporateBookings)
+          .where(and(eq(corporateBookings.classId, originalClass.id), eq(corporateBookings.status, "waitlisted")));
+
+        const combinedWaitlist = [
+          ...normalWaitlist.map((w) => ({ ...w, type: "normal" as const })),
+          ...corpWaitlist.map((w) => ({ ...w, type: "corporate" as const })),
+        ].sort((a, b) => new Date(a.bookedAt).getTime() - new Date(b.bookedAt).getTime());
+
+        const today = new Date().toISOString().slice(0, 10);
+
+        for (const candidate of combinedWaitlist) {
+          if (candidate.type === "normal") {
+            if (!candidate.membershipId) continue;
+            const ms = await ctx.db
+              .select()
+              .from(memberships)
+              .where(eq(memberships.id, candidate.membershipId))
+              .get();
+
+            const isEligible = ms &&
+              ms.status === "active" &&
+              ms.endDate >= today &&
+              (ms.creditsRemaining >= 999 || ms.creditsRemaining >= originalClass.creditCost);
+
+            if (isEligible) {
+              await ctx.db
+                .update(bookings)
+                .set({ status: "booked", creditsUsed: originalClass.creditCost })
+                .where(eq(bookings.id, candidate.id));
+
+              if (ms.creditsRemaining < 999) {
+                await ctx.db
+                  .update(memberships)
+                  .set({ creditsRemaining: ms.creditsRemaining - originalClass.creditCost })
+                  .where(eq(memberships.id, ms.id));
+              }
+
+              await ctx.db.insert(notifications).values({
+                userId: candidate.userId,
+                type: "waitlist_promotion",
+                title: "Waitlist Promotion",
+                message: `Good news! You have been promoted from the waitlist to a confirmed spot in ${originalClass.name}.`,
+                read: false,
+              });
+
+              break;
+            }
+          } else {
+            const company = await ctx.db
+              .select()
+              .from(companies)
+              .where(eq(companies.id, candidate.companyId))
+              .get();
+
+            const isEligible = company && company.active && company.creditPoolBalance >= originalClass.creditCost;
+
+            if (isEligible) {
+              await ctx.db
+                .update(corporateBookings)
+                .set({ status: "booked", creditsUsed: originalClass.creditCost })
+                .where(eq(corporateBookings.id, candidate.id));
+
+              await ctx.db
+                .update(companies)
+                .set({ creditPoolBalance: company.creditPoolBalance - originalClass.creditCost })
+                .where(eq(companies.id, company.id));
+
+              await ctx.db.insert(notifications).values({
+                userId: candidate.userId,
+                type: "waitlist_promotion",
+                title: "Waitlist Promotion",
+                message: `Good news! You have been promoted to a confirmed spot in ${originalClass.name} using your company credits.`,
+                read: false,
+              });
+
+              break;
+            }
+          }
+        }
+      }
 
       // Record the reschedule
       await ctx.db.insert(reschedules).values({
@@ -293,6 +425,13 @@ export const reschedulesRouter = router({
 
       // Verify reschedule is allowed (within 4 hours of original class)
       const hoursBeforeOriginal = hoursUntil(originalClass.startsAt);
+      // DATA INTEGRITY RULE: Reject rescheduling if the original class has already started.
+      if (hoursBeforeOriginal <= 0) {
+        return {
+          valid: false,
+          reason: "Cannot reschedule a class that has already started.",
+        };
+      }
       if (hoursBeforeOriginal < FREE_RESCHEDULE_HOURS) {
         return {
           valid: false,
@@ -363,15 +502,22 @@ export const reschedulesRouter = router({
         };
       }
 
-      // Check if target class is full
-      const [{ count }] = await ctx.db
-        .select({ count: sql<number>`count(*)` })
+      // Check if target class is full (unified check)
+      const [{ stdCount }] = await ctx.db
+        .select({ stdCount: sql<number>`count(*)` })
         .from(bookings)
         .where(
           and(eq(bookings.classId, targetClass.id), eq(bookings.status, "booked")),
         );
 
-      const targetIsFull = Number(count) >= targetClass.capacity;
+      const [{ corpCount }] = await ctx.db
+        .select({ corpCount: sql<number>`count(*)` })
+        .from(corporateBookings)
+        .where(
+          and(eq(corporateBookings.classId, targetClass.id), eq(corporateBookings.status, "booked")),
+        );
+
+      const targetIsFull = Number(stdCount || 0) + Number(corpCount || 0) >= targetClass.capacity;
 
       return {
         valid: true,

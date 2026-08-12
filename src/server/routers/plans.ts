@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { eq } from "drizzle-orm";
+import { and, eq, gte } from "drizzle-orm";
 import { membershipPlans, memberships, payments } from "@/db/schema";
 import { router, publicProcedure, protectedProcedure, adminProcedure } from "../trpc";
 
@@ -26,6 +26,14 @@ export const plansRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
+      // SECURITY RULE: Ensure user account is active
+      if (!ctx.user.active) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "This account has been deactivated.",
+        });
+      }
+
       const plan = await ctx.db
         .select()
         .from(membershipPlans)
@@ -43,6 +51,26 @@ export const plansRouter = router({
       }
 
       const today = new Date().toISOString().slice(0, 10);
+
+      // BUSINESS RULE: A normal member should not accidentally end up with multiple overlapping active memberships.
+      const existingActive = await ctx.db
+        .select()
+        .from(memberships)
+        .where(
+          and(
+            eq(memberships.userId, ctx.user.id),
+            eq(memberships.status, "active"),
+            gte(memberships.endDate, today)
+          )
+        )
+        .get();
+
+      if (existingActive) {
+        throw new TRPCError({
+          code: "CONFLICT",
+          message: "You already have an active membership. Please wait for it to expire or contact support to upgrade.",
+        });
+      }
 
       const membership = await ctx.db
         .insert(memberships)

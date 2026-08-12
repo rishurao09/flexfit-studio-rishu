@@ -24,7 +24,7 @@ export default function DashboardPage() {
   const { data: profile, isLoading } = trpc.members.profile.useQuery(undefined, {
     retry: false,
   });
-  const { data: bookings } = trpc.bookings.mine.useQuery({ includePast: false });
+  const { data: bookings } = trpc.bookings.mine.useQuery({ includePast: true });
   const { data: rescheduleHistory } = trpc.reschedules.history.useQuery();
 
   const cancel = trpc.bookings.cancel.useMutation({
@@ -39,6 +39,87 @@ export default function DashboardPage() {
   if (!profile) return <p className="muted">Please sign in to view your bookings.</p>;
 
   const ms = profile.membership;
+  const now = new Date();
+
+  // DATA INTEGRITY RULE: Classification logic to split member bookings into four mutually exclusive groups.
+  // This is required on the client because SQLite stores date/times as ISO strings, and splitting bookings
+  // dynamically based on status and the current time ensures that historical, upcoming, cancelled,
+  // and waitlist items are distinct, preventing confusion and ensuring accurate display of active bookings.
+
+  // 1. Upcoming: Confirmed bookings where class start time is in the future or present.
+  const upcomingBookings = bookings?.filter(
+    (b) => b.status === "booked" && new Date(b.startsAt) >= now
+  ) || [];
+
+  // 2. Waitlisted: active waitlisted registrations where class start time is in the future or present.
+  const waitlistedBookings = bookings?.filter(
+    (b) => b.status === "waitlisted" && new Date(b.startsAt) >= now
+  ) || [];
+
+  // 3. Past: any class that has already started (startsAt < now) or has been checked into ('attended' / 'no_show'),
+  // explicitly excluding cancelled bookings.
+  const pastBookings = bookings?.filter(
+    (b) => b.status !== "cancelled" && (new Date(b.startsAt) < now || b.status === "attended" || b.status === "no_show")
+  ) || [];
+
+  // 4. Cancelled: bookings that have been explicitly cancelled.
+  const cancelledBookings = bookings?.filter(
+    (b) => b.status === "cancelled"
+  ) || [];
+
+  const renderBookingList = (list: typeof bookings, showActions = false) => {
+    if (!list || list.length === 0) {
+      return <p className="muted text-sm">No bookings in this section.</p>;
+    }
+
+    return (
+      <div className="space-y-2">
+        {list.map((b) => (
+          <div key={b.id} className="panel flex items-center gap-2 p-4 flex-wrap sm:flex-nowrap">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <h3 className="font-medium">{b.className}</h3>
+                <span className="muted text-xs uppercase tracking-wide">
+                  {b.status}
+                </span>
+              </div>
+              <p className="muted mt-0.5 text-sm">
+                {formatDateTime(b.startsAt)} &middot; {b.room}
+              </p>
+            </div>
+
+            {showActions && (b.status === "booked" || b.status === "waitlisted") && (
+              <div className="flex gap-2 w-full sm:w-auto">
+                {b.status === "booked" && (
+                  <button
+                    className="btn text-sm flex-1 sm:flex-none"
+                    disabled={cancel.isPending}
+                    onClick={() => {
+                      setRescheduleModal({
+                        isOpen: true,
+                        bookingId: b.id,
+                        className: b.className,
+                        classTime: b.startsAt,
+                      });
+                    }}
+                  >
+                    Reschedule
+                  </button>
+                )}
+                <button
+                  className="btn text-sm flex-1 sm:flex-none"
+                  disabled={cancel.isPending}
+                  onClick={() => cancel.mutate({ bookingId: b.id })}
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    );
+  };
 
   return (
     <div className="space-y-8">
@@ -94,55 +175,22 @@ export default function DashboardPage() {
           </p>
         )}
 
-        {bookings?.length ? (
-          <div className="space-y-2">
-            {bookings.map((b) => (
-              <div key={b.id} className="panel flex items-center gap-2 p-4 flex-wrap sm:flex-nowrap">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <h3 className="font-medium">{b.className}</h3>
-                    <span className="muted text-xs uppercase tracking-wide">
-                      {b.status}
-                    </span>
-                  </div>
-                  <p className="muted mt-0.5 text-sm">
-                    {formatDateTime(b.startsAt)} &middot; {b.room}
-                  </p>
-                </div>
+        {renderBookingList(upcomingBookings, true)}
+      </section>
 
-                {(b.status === "booked" || b.status === "waitlisted") && (
-                  <div className="flex gap-2 w-full sm:w-auto">
-                    {b.status === "booked" && (
-                      <button
-                        className="btn text-sm flex-1 sm:flex-none"
-                        disabled={cancel.isPending}
-                        onClick={() => {
-                          setRescheduleModal({
-                            isOpen: true,
-                            bookingId: b.id,
-                            className: b.className,
-                            classTime: b.startsAt,
-                          });
-                        }}
-                      >
-                        Reschedule
-                      </button>
-                    )}
-                    <button
-                      className="btn text-sm flex-1 sm:flex-none"
-                      disabled={cancel.isPending}
-                      onClick={() => cancel.mutate({ bookingId: b.id })}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="muted text-sm">No upcoming bookings.</p>
-        )}
+      <section className="space-y-3">
+        <h2 className="font-medium">Waitlisted bookings</h2>
+        {renderBookingList(waitlistedBookings, true)}
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="font-medium">Past bookings</h2>
+        {renderBookingList(pastBookings, false)}
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="font-medium">Cancelled bookings</h2>
+        {renderBookingList(cancelledBookings, false)}
       </section>
 
       {rescheduleHistory && rescheduleHistory.length > 0 && (

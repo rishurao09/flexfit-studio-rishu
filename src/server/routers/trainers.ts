@@ -5,35 +5,44 @@ import { classes, users, trainerAvailability } from "@/db/schema";
 import { router, protectedProcedure } from "../trpc";
 
 export const trainersRouter = router({
-  upcomingClasses: protectedProcedure.query(async ({ ctx }) => {
-    if (ctx.user.role !== "trainer") {
-      throw new TRPCError({
-        code: "FORBIDDEN",
-        message: "Only trainers can access this.",
-      });
-    }
+  upcomingClasses: protectedProcedure
+    .input(z.object({ trainerId: z.number().optional() }).default({}))
+    .query(async ({ ctx, input }) => {
+      let targetTrainerId = ctx.user.id;
 
-    const now = new Date().toISOString();
+      if (ctx.user.role === "admin") {
+        if (input.trainerId !== undefined) {
+          targetTrainerId = input.trainerId;
+        }
+      } else if (ctx.user.role !== "trainer") {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "Only staff can access this.",
+        });
+      }
 
-    return ctx.db
-      .select({
-        id: classes.id,
-        name: classes.name,
-        room: classes.room,
-        startsAt: classes.startsAt,
-        durationMin: classes.durationMin,
-        cancelled: classes.cancelled,
-      })
-      .from(classes)
-      .where(
-        and(
-          eq(classes.trainerId, ctx.user.id),
-          gte(classes.startsAt, now),
-          eq(classes.cancelled, false),
-        ),
-      )
-      .orderBy(classes.startsAt);
-  }),
+      const now = new Date().toISOString();
+
+      return ctx.db
+        .select({
+          id: classes.id,
+          name: classes.name,
+          room: classes.room,
+          startsAt: classes.startsAt,
+          durationMin: classes.durationMin,
+          capacity: classes.capacity,
+          cancelled: classes.cancelled,
+        })
+        .from(classes)
+        .where(
+          and(
+            eq(classes.trainerId, targetTrainerId),
+            gte(classes.startsAt, now),
+            eq(classes.cancelled, false),
+          ),
+        )
+        .orderBy(classes.startsAt);
+    }),
 
   availability: protectedProcedure.query(async ({ ctx }) => {
     if (ctx.user.role !== "trainer") {
