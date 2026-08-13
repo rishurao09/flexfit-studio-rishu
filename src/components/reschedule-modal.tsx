@@ -63,17 +63,19 @@ export function RescheduleModal({
       style={{
         position: "fixed",
         inset: 0,
-        background: "rgba(0,0,0,0.5)",
+        background: "rgba(0,0,0,0.65)",
+        backdropFilter: "blur(4px)",
+        WebkitBackdropFilter: "blur(4px)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        zIndex: 50,
+        zIndex: 9999,
       }}
       onClick={onClose}
     >
       <div
-        className="panel space-y-4 p-6"
-        style={{ maxWidth: "500px", width: "90%" }}
+        className="glass-strong space-y-4 p-6 rounded-2xl"
+        style={{ maxWidth: "500px", width: "90%", position: "relative" }}
         onClick={(e) => e.stopPropagation()}
       >
         <div>
