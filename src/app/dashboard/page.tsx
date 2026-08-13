@@ -136,7 +136,8 @@ export default function DashboardPage() {
   };
 
   return (
-    <div className="space-y-12 py-6 animate-slide-in">
+    <>
+      <div className="space-y-12 py-6 animate-slide-in">
       <div className="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-2 border-b border-neutral-900 pb-6">
         <div>
           <h1 className="text-4xl sm:text-5xl font-black tracking-tighter uppercase">
@@ -226,6 +227,7 @@ export default function DashboardPage() {
         </section>
       )}
 
+      </div>
       <RescheduleModal
         isOpen={rescheduleModal.isOpen}
         onClose={() =>
@@ -238,6 +240,6 @@ export default function DashboardPage() {
           success("Class rescheduled successfully!");
         }}
       />
-    </div>
+    </>
   );
 }
