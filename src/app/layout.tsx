@@ -32,10 +32,8 @@ export default function RootLayout({
         <div className="fixed inset-0 z-0 bg-black bg-opacity-40 pointer-events-none" />
 
         <Providers>
-          <div className="relative z-10 flex flex-col min-h-screen">
-            <NavBar />
-            <main className="mx-auto max-w-5xl w-full px-6 py-10 flex-1">{children}</main>
-          </div>
+          <NavBar />
+          <main className="mx-auto max-w-5xl w-full px-6 py-10 flex-1 relative z-10">{children}</main>
         </Providers>
       </body>
     </html>
