@@ -24,8 +24,8 @@ export default function RootLayout({
             backgroundSize: "cover",
             backgroundPosition: "center 30%",
             backgroundRepeat: "no-repeat",
-            filter: "blur(30px) brightness(0.35) contrast(1.1)",
-            transform: "scale(1.1)", // Prevents blur edge artifacts at viewport boundaries
+            filter: "blur(10px) brightness(0.35) contrast(1.1)",
+            transform: "scale(1.05)", // Adjusted scale to match lighter blur boundaries
           }}
         />
         {/* Environmental Ambient Overlay */}
