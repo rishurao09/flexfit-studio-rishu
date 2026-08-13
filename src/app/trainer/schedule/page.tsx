@@ -119,11 +119,11 @@ export default function TrainerSchedulePage() {
   const { data: user } = trpc.auth.me.useQuery();
   const { data: classes, isLoading: classesLoading } =
     trpc.trainers.upcomingClasses.useQuery(undefined, {
-      enabled: user?.role === "trainer",
+      enabled: user?.role === "trainer" || user?.role === "admin",
     });
   const { data: availability, isLoading: availLoading } =
     trpc.trainers.availability.useQuery(undefined, {
-      enabled: user?.role === "trainer",
+      enabled: user?.role === "trainer" || user?.role === "admin",
     });
 
   const [editingDay, setEditingDay] = useState<number | null>(null);
@@ -145,7 +145,7 @@ export default function TrainerSchedulePage() {
     },
   });
 
-  if (user?.role !== "trainer") {
+  if (user?.role !== "trainer" && user?.role !== "admin") {
     return <p className="muted">Access denied. Trainers only.</p>;
   }
 

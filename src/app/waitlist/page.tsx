@@ -2,15 +2,21 @@
 
 import { trpc } from "@/lib/trpc";
 import { formatDateTime } from "@/lib/format";
+import { useToast } from "@/components/ToastProvider";
 
 export default function WaitlistPage() {
   const utils = trpc.useUtils();
+  const { success, error } = useToast();
   const { data: waitlisted, isLoading } = trpc.bookings.waitlisted.useQuery();
   const cancel = trpc.bookings.cancel.useMutation({
     onSuccess: async () => {
       await utils.bookings.waitlisted.invalidate();
       await utils.bookings.mine.invalidate();
       await utils.classes.list.invalidate();
+      success("Removed from waitlist successfully.");
+    },
+    onError: (err) => {
+      error(err.message);
     },
   });
 
@@ -25,11 +31,7 @@ export default function WaitlistPage() {
         </p>
       </div>
 
-      {cancel.error && (
-        <p className="panel p-3 text-sm" style={{ color: "#f87171" }}>
-          {cancel.error.message}
-        </p>
-      )}
+
 
       {waitlisted?.length ? (
         <div className="space-y-2">

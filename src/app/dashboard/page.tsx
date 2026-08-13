@@ -4,6 +4,7 @@ import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { formatDate, formatDateTime } from "@/lib/format";
 import { RescheduleModal } from "@/components/reschedule-modal";
+import { useToast } from "@/components/ToastProvider";
 
 export default function DashboardPage() {
   const [rescheduleModal, setRescheduleModal] = useState<{
@@ -18,8 +19,6 @@ export default function DashboardPage() {
     classTime: "",
   });
 
-  const [successMessage, setSuccessMessage] = useState<string | null>(null);
-
   const utils = trpc.useUtils();
   const { data: profile, isLoading } = trpc.members.profile.useQuery(undefined, {
     retry: false,
@@ -27,11 +26,17 @@ export default function DashboardPage() {
   const { data: bookings } = trpc.bookings.mine.useQuery({ includePast: true });
   const { data: rescheduleHistory } = trpc.reschedules.history.useQuery();
 
+  const { success, error } = useToast();
+
   const cancel = trpc.bookings.cancel.useMutation({
     onSuccess: async () => {
       await utils.bookings.mine.invalidate();
       await utils.members.profile.invalidate();
       await utils.classes.list.invalidate();
+      success("Booking cancelled successfully.");
+    },
+    onError: (err) => {
+      error(err.message);
     },
   });
 
@@ -69,22 +74,31 @@ export default function DashboardPage() {
 
   const renderBookingList = (list: typeof bookings, showActions = false) => {
     if (!list || list.length === 0) {
-      return <p className="muted text-sm">No bookings in this section.</p>;
+      return (
+        <div className="panel p-6 text-center border-neutral-900 bg-neutral-950/20">
+          <p className="muted text-xs font-bold uppercase tracking-widest">No sessions found in this section.</p>
+        </div>
+      );
     }
 
     return (
-      <div className="space-y-2">
+      <div className="space-y-3">
         {list.map((b) => (
-          <div key={b.id} className="panel flex items-center gap-2 p-4 flex-wrap sm:flex-nowrap">
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <h3 className="font-medium">{b.className}</h3>
-                <span className="muted text-xs uppercase tracking-wide">
+          <div key={b.id} className="panel flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-5 border-neutral-900 hover:border-neutral-800 transition-colors">
+            <div className="min-w-0 flex-1 space-y-1">
+              <div className="flex items-center gap-3">
+                <h3 className="text-base font-black uppercase tracking-tight text-neutral-200">{b.className}</h3>
+                <span className="rounded-full px-2.5 py-0.5 text-[9px] font-black uppercase tracking-widest"
+                  style={{
+                    backgroundColor: b.status === "booked" ? "#052e16" : b.status === "waitlisted" ? "#2e1a05" : "#17181c",
+                    color: b.status === "booked" ? "#4ade80" : b.status === "waitlisted" ? "#fbbf24" : "#9ca3af"
+                  }}
+                >
                   {b.status}
                 </span>
               </div>
-              <p className="muted mt-0.5 text-sm">
-                {formatDateTime(b.startsAt)} &middot; {b.room}
+              <p className="text-xs font-bold uppercase tracking-widest text-neutral-500">
+                {formatDateTime(b.startsAt)} &middot; <span className="text-neutral-300">{b.room}</span>
               </p>
             </div>
 
@@ -92,7 +106,7 @@ export default function DashboardPage() {
               <div className="flex gap-2 w-full sm:w-auto">
                 {b.status === "booked" && (
                   <button
-                    className="btn text-sm flex-1 sm:flex-none"
+                    className="btn btn-sm text-[10px] tracking-wider font-bold py-1.5 px-3 border-neutral-800"
                     disabled={cancel.isPending}
                     onClick={() => {
                       setRescheduleModal({
@@ -107,7 +121,7 @@ export default function DashboardPage() {
                   </button>
                 )}
                 <button
-                  className="btn text-sm flex-1 sm:flex-none"
+                  className="btn btn-sm text-[10px] tracking-wider font-bold py-1.5 px-3 border-neutral-850 hover:border-red-900/50 hover:text-red-400"
                   disabled={cancel.isPending}
                   onClick={() => cancel.mutate({ bookingId: b.id })}
                 >
@@ -122,94 +136,87 @@ export default function DashboardPage() {
   };
 
   return (
-    <div className="space-y-8">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">
-          Hello, {profile.name.split(" ")[0]}
-        </h1>
-        <p className="muted mt-1 text-sm">
-          {profile.classesAttended} classes attended
-        </p>
+    <div className="space-y-12 py-6 animate-slide-in">
+      <div className="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-2 border-b border-neutral-900 pb-6">
+        <div>
+          <h1 className="text-4xl sm:text-5xl font-black tracking-tighter uppercase">
+            Hello, {profile.name.split(" ")[0]}<span style={{ color: "var(--accent)" }}>.</span>
+          </h1>
+          <p className="muted text-xs font-bold uppercase tracking-widest mt-1.5">
+            {profile.classesAttended} sessions completed &middot; Keep going!
+          </p>
+        </div>
       </div>
 
-      <section className="panel p-5">
-        <h2 className="font-medium">Membership</h2>
+      <section className="panel p-6 border-neutral-900">
+        <h2 className="text-xs font-black uppercase tracking-widest text-neutral-400 border-b border-neutral-900 pb-4 mb-4">Membership Details</h2>
         {ms ? (
-          <dl className="mt-3 grid gap-3 text-sm sm:grid-cols-4">
-            <div>
-              <dt className="muted">Plan</dt>
-              <dd>{ms.planName}</dd>
+          <div className="grid gap-6 sm:grid-cols-4">
+            <div className="space-y-0.5">
+              <span className="text-[10px] font-black uppercase tracking-widest muted">Plan Option</span>
+              <p className="text-sm font-bold uppercase text-neutral-100">{ms.planName}</p>
             </div>
-            <div>
-              <dt className="muted">Status</dt>
-              <dd>{ms.status}</dd>
+            <div className="space-y-0.5">
+              <span className="text-[10px] font-black uppercase tracking-widest muted">Status</span>
+              <p className="text-sm font-bold uppercase text-neutral-100">{ms.status}</p>
             </div>
-            <div>
-              <dt className="muted">Valid until</dt>
-              <dd>{formatDate(ms.endDate)}</dd>
+            <div className="space-y-0.5">
+              <span className="text-[10px] font-black uppercase tracking-widest muted">Valid Until</span>
+              <p className="text-sm font-bold uppercase text-neutral-100">{formatDate(ms.endDate)}</p>
             </div>
-            <div>
-              <dt className="muted">Credits</dt>
-              <dd>{ms.creditsRemaining >= 999 ? "Unlimited" : ms.creditsRemaining}</dd>
+            <div className="space-y-0.5">
+              <span className="text-[10px] font-black uppercase tracking-widest muted">Class Credits</span>
+              <p className="text-sm font-bold uppercase text-neutral-100" style={{ color: "var(--accent)" }}>
+                {ms.creditsRemaining >= 999 ? "Unlimited" : ms.creditsRemaining}
+              </p>
             </div>
-          </dl>
+          </div>
         ) : (
-          <p className="muted mt-2 text-sm">
-            No active membership. Pick a plan to start booking classes.
-          </p>
+          <div className="text-center py-4">
+            <p className="muted text-xs font-bold uppercase tracking-widest">
+              No active membership. Pick a plan to start booking classes.
+            </p>
+          </div>
         )}
       </section>
 
-      <section className="space-y-3">
-        <h2 className="font-medium">Upcoming bookings</h2>
-
-        {successMessage && (
-          <p className="panel p-3 text-sm" style={{ color: "#4ade80" }}>
-            {successMessage}
-          </p>
-        )}
-
-        {cancel.error && (
-          <p className="panel p-3 text-sm" style={{ color: "#f87171" }}>
-            {cancel.error.message}
-          </p>
-        )}
-
+      <section className="space-y-4">
+        <h2 className="text-xs font-black uppercase tracking-widest text-neutral-400">Upcoming bookings</h2>
         {renderBookingList(upcomingBookings, true)}
       </section>
 
-      <section className="space-y-3">
-        <h2 className="font-medium">Waitlisted bookings</h2>
+      <section className="space-y-4">
+        <h2 className="text-xs font-black uppercase tracking-widest text-neutral-400">Waitlisted bookings</h2>
         {renderBookingList(waitlistedBookings, true)}
       </section>
 
-      <section className="space-y-3">
-        <h2 className="font-medium">Past bookings</h2>
+      <section className="space-y-4">
+        <h2 className="text-xs font-black uppercase tracking-widest text-neutral-400">Past bookings</h2>
         {renderBookingList(pastBookings, false)}
       </section>
 
-      <section className="space-y-3">
-        <h2 className="font-medium">Cancelled bookings</h2>
+      <section className="space-y-4">
+        <h2 className="text-xs font-black uppercase tracking-widest text-neutral-400">Cancelled bookings</h2>
         {renderBookingList(cancelledBookings, false)}
       </section>
 
       {rescheduleHistory && rescheduleHistory.length > 0 && (
-        <section className="space-y-3">
-          <h2 className="font-medium">Reschedule history</h2>
-          <div className="space-y-2">
+        <section className="space-y-4">
+          <h2 className="text-xs font-black uppercase tracking-widest text-neutral-400">Reschedule history</h2>
+          <div className="grid gap-3 sm:grid-cols-2">
             {rescheduleHistory.map((r) => (
-              <div key={r.id} className="panel p-4">
-                <div className="text-sm">
-                  <p className="font-medium">
+              <div key={r.id} className="panel p-5 border-neutral-900 hover:border-neutral-850 transition-colors">
+                <div className="text-xs space-y-1">
+                  <p className="font-black uppercase tracking-tight text-neutral-200">
                     {r.fromClassName}
                   </p>
-                  <p className="muted text-xs mt-1">
-                    From: {formatDateTime(r.fromClassTime ?? "")} • {r.fromClassRoom}
+                  <p className="muted text-[10px] font-semibold uppercase tracking-wider">
+                    From: {formatDateTime(r.fromClassTime ?? "")} &middot; {r.fromClassRoom}
                   </p>
-                  <p className="muted text-xs">
-                    To: {formatDateTime(r.toClassTime ?? "")} • {r.toClassRoom}
+                  <p className="muted text-[10px] font-semibold uppercase tracking-wider">
+                    To: {formatDateTime(r.toClassTime ?? "")} &middot; {r.toClassRoom}
                   </p>
-                  <p className="muted text-xs mt-1">
+                  <p className="muted text-[9px] font-medium mt-2 pt-2 border-t border-neutral-900 block">
                     Rescheduled {formatDate(r.rescheduledAt)}
                   </p>
                 </div>
@@ -228,8 +235,7 @@ export default function DashboardPage() {
         fromClassName={rescheduleModal.className}
         fromClassTime={rescheduleModal.classTime}
         onSuccess={() => {
-          setSuccessMessage("Class rescheduled successfully!");
-          setTimeout(() => setSuccessMessage(null), 3000);
+          success("Class rescheduled successfully!");
         }}
       />
     </div>

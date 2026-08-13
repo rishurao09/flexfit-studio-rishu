@@ -45,10 +45,10 @@ export const trainersRouter = router({
     }),
 
   availability: protectedProcedure.query(async ({ ctx }) => {
-    if (ctx.user.role !== "trainer") {
+    if (ctx.user.role !== "trainer" && ctx.user.role !== "admin") {
       throw new TRPCError({
         code: "FORBIDDEN",
-        message: "Only trainers can access this.",
+        message: "Only staff can access this.",
       });
     }
 
